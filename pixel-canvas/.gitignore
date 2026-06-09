@@ -1,0 +1,26 @@
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+### H2 file database (created at runtime) ###
+data/
+*.db
+*.mv.db
+*.trace.db
+
+### IDE ###
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.classpath
+.project
+.settings/
+bin/
+
+### OS ###
+.DS_Store
+Thumbs.db
+
+### Logs ###
+*.log

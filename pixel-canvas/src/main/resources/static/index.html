@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pixel Pulse — live collaborative canvas</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Figtree:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1.6.1/dist/sockjs.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@stomp/stompjs@7.0.0/bundles/stomp.umd.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #0e0e14;
+      --bg-2: #16161f;
+      --surface: #1d1d28;
+      --line: #2a2a38;
+      --text: #ECEAF3;
+      --text-soft: #8b8aa0;
+      --accent: #ff5db1;
+      --live: #4ade80;
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; min-height: 100vh;
+      background:
+        radial-gradient(900px 500px at 15% -10%, rgba(255,93,177,.12), transparent 60%),
+        radial-gradient(900px 500px at 100% 0%, rgba(0,211,221,.10), transparent 55%),
+        var(--bg);
+      color: var(--text);
+      font-family: "Figtree", -apple-system, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .mono { font-family: "JetBrains Mono", monospace; }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 40px 20px 70px; }
+
+    header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 6px; }
+    h1 {
+      font-family: "Syne", sans-serif; font-weight: 800; font-size: 38px;
+      letter-spacing: -0.02em; margin: 0; line-height: 1;
+    }
+    h1 .px { color: var(--accent); }
+    .sub { color: var(--text-soft); font-size: 15px; margin: 10px 0 22px; max-width: 52ch; }
+
+    .pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: var(--surface); border: 1px solid var(--line);
+      padding: 8px 14px; border-radius: 999px; font-size: 14px; font-weight: 600;
+    }
+    .pill .num { color: var(--accent); }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-soft); }
+    .dot.on { background: var(--live); box-shadow: 0 0 0 4px rgba(74,222,128,.18); }
+
+    .stage {
+      background: var(--bg-2); border: 1px solid var(--line); border-radius: 20px;
+      padding: 22px; box-shadow: 0 30px 70px rgba(0,0,0,.5);
+      display: flex; flex-direction: column; align-items: center; gap: 18px;
+    }
+    .canvas-frame {
+      background: #fff; border-radius: 8px; padding: 0; line-height: 0;
+      box-shadow: 0 0 0 1px var(--line), 0 14px 30px rgba(0,0,0,.4);
+      overflow: hidden;
+    }
+    canvas { display: block; cursor: crosshair; image-rendering: pixelated; touch-action: none; }
+
+    .palette { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 420px; }
+    .swatch {
+      width: 30px; height: 30px; border-radius: 8px; cursor: pointer;
+      border: 2px solid transparent; transition: transform .1s ease, border-color .1s ease;
+    }
+    .swatch:hover { transform: translateY(-2px); }
+    .swatch.active { border-color: var(--text); transform: translateY(-2px) scale(1.08); }
+
+    .readout { display: flex; gap: 18px; align-items: center; color: var(--text-soft); font-size: 13px; }
+    .readout .chip {
+      display: inline-flex; align-items: center; gap: 8px;
+    }
+    .readout .selected-color { width: 18px; height: 18px; border-radius: 5px; border: 1px solid var(--line); }
+
+    .hint { color: var(--text-soft); font-size: 13px; text-align: center; margin-top: 18px; line-height: 1.6; }
+    .hint b { color: var(--text); }
+
+    .status { font-size: 13px; font-weight: 600; }
+    .status.connected { color: var(--live); }
+    .status.connecting { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+    const CELL = 14;
+
+    function App() {
+      const [size, setSize] = useState(0);
+      const [palette, setPalette] = useState([]);
+      const [color, setColor] = useState("#E50000");
+      const [online, setOnline] = useState(0);
+      const [status, setStatus] = useState("connecting"); // connecting | connected
+      const [hover, setHover] = useState(null);            // {x, y}
+
+      const canvasRef = useRef(null);
+      const ctxRef = useRef(null);
+      const stompRef = useRef(null);
+      const colorRef = useRef(color);
+      const sizeRef = useRef(0);
+      colorRef.current = color;
+
+      const paintCell = (x, y, col) => {
+        const ctx = ctxRef.current;
+        if (!ctx) return;
+        ctx.fillStyle = col;
+        ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+        ctx.strokeStyle = "rgba(0,0,0,0.06)";
+        ctx.strokeRect(x * CELL + 0.5, y * CELL + 0.5, CELL, CELL);
+      };
+
+      const drawGrid = (ctx, n) => {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, n * CELL, n * CELL);
+        ctx.strokeStyle = "rgba(0,0,0,0.06)";
+        for (let i = 0; i <= n; i++) {
+          ctx.beginPath(); ctx.moveTo(i * CELL + 0.5, 0); ctx.lineTo(i * CELL + 0.5, n * CELL); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(0, i * CELL + 0.5); ctx.lineTo(n * CELL, i * CELL + 0.5); ctx.stroke();
+        }
+      };
+
+      // 1) Load initial state, then connect WebSocket
+      useEffect(() => {
+        let client;
+        (async () => {
+          const res = await fetch("/api/canvas");
+          const data = await res.json();
+          setSize(data.size);
+          sizeRef.current = data.size;
+          setPalette(data.palette);
+          setColor(data.palette[5] || "#E50000");
+
+          // wait a tick for the canvas element to mount with correct dimensions
+          requestAnimationFrame(() => {
+            const canvas = canvasRef.current;
+            const ctx = canvas.getContext("2d");
+            ctxRef.current = ctx;
+            drawGrid(ctx, data.size);
+            data.pixels.forEach((p) => paintCell(p.x, p.y, p.color));
+          });
+
+          client = new StompJs.Client({
+            webSocketFactory: () => new SockJS("/ws"),
+            reconnectDelay: 3000,
+            onConnect: () => {
+              setStatus("connected");
+              client.subscribe("/topic/pixels", (frame) => {
+                const p = JSON.parse(frame.body);
+                paintCell(p.x, p.y, p.color);
+              });
+              client.subscribe("/topic/presence", (frame) => {
+                setOnline(JSON.parse(frame.body).online);
+              });
+            },
+            onWebSocketClose: () => setStatus("connecting"),
+          });
+          client.activate();
+          stompRef.current = client;
+        })();
+
+        return () => { if (client) client.deactivate(); };
+      }, []);
+
+      const cellFromEvent = (e) => {
+        const rect = canvasRef.current.getBoundingClientRect();
+        const x = Math.floor((e.clientX - rect.left) / CELL);
+        const y = Math.floor((e.clientY - rect.top) / CELL);
+        return { x, y };
+      };
+
+      const handleClick = (e) => {
+        const { x, y } = cellFromEvent(e);
+        const n = sizeRef.current;
+        if (x < 0 || y < 0 || x >= n || y >= n) return;
+        const col = colorRef.current;
+        paintCell(x, y, col); // optimistic
+        if (stompRef.current && stompRef.current.connected) {
+          stompRef.current.publish({
+            destination: "/app/paint",
+            body: JSON.stringify({ x, y, color: col }),
+          });
+        }
+      };
+
+      const handleMove = (e) => {
+        const { x, y } = cellFromEvent(e);
+        const n = sizeRef.current;
+        if (x < 0 || y < 0 || x >= n || y >= n) { setHover(null); return; }
+        setHover({ x, y });
+      };
+
+      const dim = size * CELL;
+
+      return (
+        <div className="wrap">
+          <header>
+            <div>
+              <h1>Pixel<span className="px">Pulse</span></h1>
+            </div>
+            <div className="pill">
+              <span className={"dot" + (status === "connected" ? " on" : "")}></span>
+              <span className="num">{online}</span>&nbsp;online
+            </div>
+          </header>
+
+          <p className="sub">
+            A single shared canvas. Click a cell to paint it — everyone connected sees it appear
+            in real time. Open this page in two tabs to watch the magic.
+          </p>
+
+          <div className="stage">
+            <div className="canvas-frame">
+              <canvas
+                ref={canvasRef}
+                width={dim || 1}
+                height={dim || 1}
+                style={{ width: (dim || 1) + "px", height: (dim || 1) + "px" }}
+                onClick={handleClick}
+                onMouseMove={handleMove}
+                onMouseLeave={() => setHover(null)}
+              />
+            </div>
+
+            <div className="palette">
+              {palette.map((c) => (
+                <div
+                  key={c}
+                  className={"swatch" + (c === color ? " active" : "")}
+                  style={{ background: c }}
+                  title={c}
+                  onClick={() => setColor(c)}
+                />
+              ))}
+            </div>
+
+            <div className="readout">
+              <span className="chip">
+                <span className="selected-color" style={{ background: color }}></span>
+                <span className="mono">{color}</span>
+              </span>
+              <span className="chip mono">
+                {hover ? `(${hover.x}, ${hover.y})` : `${size}×${size}`}
+              </span>
+              <span className={"status " + status}>
+                {status === "connected" ? "● live" : "○ connecting…"}
+              </span>
+            </div>
+          </div>
+
+          <p className="hint">
+            Built with <b>Spring Boot WebSockets</b> (STOMP) + <b>React</b>. Pixels are validated
+            server-side and saved, so the artwork survives a refresh — and a restart.
+          </p>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
